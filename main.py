@@ -16,7 +16,8 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -65,7 +66,20 @@ async def auto_loop():
             await asyncio.to_thread(run_collect)
         except Exception:
             log.exception("자동 수집 실패")
-        await asyncio.sleep(MINUTES * 60)
+        await asyncio.sleep(seconds_until_next())
+
+
+def seconds_until_next() -> float:
+    """다음 수집까지 대기 시간.
+    60분 간격이면 '매시 15분'(KST)에 맞춘다 → 에어코리아가 매시 정각 데이터를 갱신한 뒤라서
+    날마다 같은 시각 값이 빠짐없이 저장된다. (서버를 재시작해도 시각이 밀리지 않음)"""
+    if MINUTES != 60:
+        return MINUTES * 60
+    now = datetime.now(db.KST)
+    nxt = now.replace(minute=15, second=0, microsecond=0)
+    if nxt <= now:
+        nxt += timedelta(hours=1)
+    return (nxt - now).total_seconds()
 
 
 @asynccontextmanager
@@ -151,6 +165,28 @@ def air_predict(station: str):
     if not hist:
         raise HTTPException(404, f"'{station}' 측정소 데이터가 없습니다")
     return {"station": station, **predict.predict_next(hist)}
+
+
+@app.get("/air/daily")
+def air_daily(station: str, hour: Optional[int] = Query(None, ge=0, le=23, description="한국 시각(0~23). 비우면 지금 시각")):
+    """같은 시각의 날짜별 값: '오늘 14시, 어제 14시, 그제 14시 …'를 나란히 보여 준다"""
+    if hour is None:
+        hour = datetime.now(db.KST).hour
+    hist = store.history(SOURCE, station, limit=24 * 40)  # 최근 약 40일 (Supabase 1회 조회 상한 1000행 이내)
+    if not hist:
+        raise HTTPException(404, f"'{station}' 측정소 데이터가 없습니다")
+    days = []
+    for h in hist:
+        t = datetime.fromisoformat(h["data_time"]).astimezone(db.KST)
+        if t.hour == hour:
+            days.append({"date": t.strftime("%Y-%m-%d"), "pm10": h["pm10"], "pm25": h["pm25"],
+                         "pm10_grade": collect.grade_pm10(h["pm10"])})
+    days.sort(key=lambda d: d["date"], reverse=True)
+    change = None
+    if len(days) >= 2 and days[0]["pm10"] is not None and days[1]["pm10"] is not None:
+        change = days[0]["pm10"] - days[1]["pm10"]
+    return {"station": station, "hour": hour, "days": days,
+            "change_vs_previous_day": change, "stored_days": len(days)}
 
 
 @app.get("/logs")
