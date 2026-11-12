@@ -29,6 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 import collect  # noqa: E402
 import db  # noqa: E402
 import predict  # noqa: E402
+import stations  # noqa: E402
 
 log = logging.getLogger("uvicorn.error")
 
@@ -132,13 +133,29 @@ def _latest_rows():
     return latest
 
 
+def _view(r):
+    """측정소 한 곳의 최신값을 화면에 줄 모양으로. 좌표(lat, lng)도 덧붙인다(없으면 None)."""
+    c = stations.coord(r["station"])
+    return {"station": r["station"], "time": db.kst(r["data_time"]),
+            "pm10": r["pm10"], "pm10_grade": r["pm10_grade"],
+            "pm25": r["pm25"], "pm25_grade": r["pm25_grade"],
+            "lat": c[0] if c else None, "lng": c[1] if c else None}
+
+
 @app.get("/air/latest")
 def air_latest():
     rows = _latest_rows()
     rows.sort(key=lambda r: r["pm10"] or 0, reverse=True)
-    return [{"station": r["station"], "time": db.kst(r["data_time"]),
-             "pm10": r["pm10"], "pm10_grade": r["pm10_grade"],
-             "pm25": r["pm25"], "pm25_grade": r["pm25_grade"]} for r in rows]
+    return [_view(r) for r in rows]
+
+
+@app.get("/air/near")
+def air_near(lat: float = Query(..., ge=-90, le=90), lng: float = Query(..., ge=-180, le=180)):
+    """지도에서 누른 지점 → 가장 가까운 측정소의 최신 미세먼지 + 거리(km)"""
+    row, km = stations.nearest(lat, lng, _latest_rows())
+    if not row:
+        raise HTTPException(404, "좌표가 있는 측정소 데이터가 아직 없습니다")
+    return {**_view(row), "distance_km": round(km, 1)}
 
 
 @app.get("/air/summary")
